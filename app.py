@@ -54,7 +54,7 @@ st.sidebar.header("1. Upload Data")
 uploaded_file = st.sidebar.file_uploader("Pilih file CSV Dataset", type=['csv'])
 
 st.sidebar.header("2. Tuning Parameter")
-support_val = st.sidebar.slider("Minimum Support", 0.0001, 0.1, 0.001, format="%.4f")
+support_val = st.sidebar.slider("Minimum Support", min_value=0.0001, max_value=0.1000, value=0.0010, step=0.0001, format="%.4f")
 lift_val = st.sidebar.slider("Minimum Lift", 0.1, 5.0, 1.0)
 
 # --- EKSEKUSI & TAMPILAN ---
