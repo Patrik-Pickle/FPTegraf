@@ -11,12 +11,13 @@ st.title("🛒 Dashboard Market Basket Analysis")
 st.write("Unggah dataset transaksi untuk menganalisis keterhubungan produk menggunakan Algoritma Apriori dan Teori Graf.")
 
 # --- PANDUAN FORMAT DATA ---
-with st.expander("📌 Lihat Panduan Format Dataset (CSV)"):
-    st.write("Dataset harus dalam format `.csv` dan wajib memiliki 3 kolom persis seperti ini: `Member_number`, `Date`, dan `itemDescription`.")
-    st.code("""Member_number,Date,itemDescription
-1808,21-07-2015,tropical fruit
-2552,05-01-2015,whole milk
-2300,19-09-2015,pip fruit
+with st.expander("📌 Lihat Panduan Format Dataset (CSV)", expanded=False):
+    st.write("Dataset harus dalam format `.csv` dan wajib memiliki 4 kolom persis seperti ini: `Member_number`, `Date`, `itemDescription`, dan `itemCategory`.")
+    st.code("""Member_number,Date,itemDescription,itemCategory
+1808,21-07-2015,tropical fruit,Makanan Segar
+2552,05-01-2015,whole milk,Makanan Segar
+2300,19-09-2015,pip fruit,Makanan Segar
+1187,12-12-2015,other vegetables,Makanan Segar
 ...""", language="text")
 
 # --- FUNGSI PIPELINE ---
@@ -63,7 +64,8 @@ if uploaded_file is not None:
     
     if st.button("Jalankan Analisis", type="primary"):
         with st.spinner("Memproses algoritma..."):
-            required_cols = {'Member_number', 'Date', 'itemDescription'}
+            # Update validasi kolom untuk menyertakan itemCategory
+            required_cols = {'Member_number', 'Date', 'itemDescription', 'itemCategory'}
             if not required_cols.issubset(df_raw.columns):
                 st.error(f"Error: Dataset harus memiliki kolom: {required_cols}. Kolom terdeteksi: {set(df_raw.columns)}")
             else:
@@ -74,8 +76,11 @@ if uploaded_file is not None:
                 else:
                     st.success(f"Analisis Selesai! Ditemukan {len(rules_df)} kombinasi hubungan.")
                     
+                    # Membuat kamus mapping (Barang -> Kategori)
+                    item_to_cat = dict(zip(df_raw['itemDescription'], df_raw['itemCategory']))
+
                     # ==========================================
-                    # DETEKSI KOMUNITAS (Dijalankan lebih awal agar warnanya bisa dipakai di Graf)
+                    # DETEKSI KOMUNITAS
                     # ==========================================
                     undirected_G = product_graph.to_undirected()
                     try:
@@ -83,7 +88,6 @@ if uploaded_file is not None:
                         meaningful_groups = [list(comp) for comp in components if len(comp) > 1]
                         meaningful_groups.sort(key=len, reverse=True)
                     except:
-                        # Jika graf terlalu kecil/error, anggap semua 1 komunitas
                         components = [list(product_graph.nodes())]
                         meaningful_groups = []
 
@@ -91,13 +95,12 @@ if uploaded_file is not None:
                     # SECTION: INSIGHT LANGSUNG
                     # ==========================================
                     st.markdown("---")
-                    st.subheader("💡 Insight Langsung")
+                    st.subheader("💡 Insight Langsung & Analisis Bisnis")
                     
                     insight_col1, insight_col2 = st.columns(2)
                     
                     with insight_col1:
-                        st.markdown("**🏆 Top 5 Kombinasi Paling Kuat (Berdasarkan Lift):**")
-                        st.caption("Kombinasi unik barang yang paling sering dibeli bersamaan.")
+                        st.markdown("**🏆 Top 5 Kombinasi Paling Kuat:**")
                         
                         insight_rules = rules_df.copy()
                         insight_rules['combined_items'] = insight_rules.apply(
@@ -108,24 +111,51 @@ if uploaded_file is not None:
                         ).drop_duplicates(subset=['combined_items']).head(5)
                         
                         for _, row in unique_top_rules.iterrows():
-                            ant = ', '.join(list(row['antecedents']))
-                            con = ', '.join(list(row['consequents']))
-                            st.write(f"- **{ant}** ➔ **{con}** *(Lift: {row['lift']:.2f})*")
+                            ant_list = list(row['antecedents'])
+                            con_list = list(row['consequents'])
+                            ant = ', '.join(ant_list)
+                            con = ', '.join(con_list)
+                            
+                            # Mengambil label kategori untuk setiap barang utama
+                            cat_ant = item_to_cat.get(ant_list[0], "Lainnya")
+                            cat_con = item_to_cat.get(con_list[0], "Lainnya")
+                            
+                            st.write(f"- **{ant}** *({cat_ant})* ➔ **{con}** *({cat_con})* (Lift: {row['lift']:.2f})")
                             
                     with insight_col2:
-                        st.markdown("**🔗 Kelompok Komunitas Produk:**")
-                        st.caption("Kelompok barang yang memiliki ikatan belanja sangat padat.")
+                        st.markdown("**🔗 Analisis Komunitas Berdasarkan Kategori:**")
+                        st.caption("Membedah isi komunitas graf untuk merekomendasikan strategi toko.")
                         
                         if meaningful_groups:
                             for i, group in enumerate(meaningful_groups[:5], 1):
-                                st.info(f"**Komunitas {i} ({len(group)} item):** {', '.join(group)}")
+                                # Hitung persentase dominasi kategori di komunitas ini
+                                cat_counts = {}
+                                for item in group:
+                                    cat = item_to_cat.get(item, "Lain-lain")
+                                    cat_counts[cat] = cat_counts.get(cat, 0) + 1
+                                
+                                sorted_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)
+                                dominant_cat = sorted_cats[0][0]
+                                dominant_pct = (sorted_cats[0][1] / len(group)) * 100
+                                
+                                # Menggunakan expander agar UI tidak terlalu penuh
+                                with st.expander(f"**Komunitas {i}** - Didominasi: {dominant_cat} ({dominant_pct:.0f}%)", expanded=(i==1)):
+                                    st.write(f"**Anggota:** {', '.join(group)}")
+                                    
+                                    # Output Analisis Bisnis Otomatis
+                                    st.markdown("**Analisis Bisnis:**")
+                                    if dominant_pct > 60:
+                                        st.success(f"📌 Komunitas ini sangat homogen (didominasi **{dominant_cat}**). Pelanggan menunjukkan pola *restocking* kategori spesifik.\n\n**Rekomendasi:** Kelompokkan barang-barang ini di lorong (aisle) yang sama agar pembeli lebih mudah menemukan barang terkait.")
+                                    else:
+                                        second_cat = sorted_cats[1][0] if len(sorted_cats) > 1 else "kategori lain"
+                                        st.info(f"⚡ Komunitas ini bersifat *lintas kategori*, utamanya menggabungkan **{dominant_cat}** dan **{second_cat}**. Ini adalah pola *Cross-Selling* natural.\n\n**Rekomendasi:** Buat promo 'Paket Bundling' atau pajang barang dari kategori {second_cat} di rak ujung (end-cap) dekat lorong {dominant_cat}.")
                         else:
                             st.write("Belum ada komunitas padat yang terbentuk.")
                             
                     st.markdown("---")
                     
                     # ==========================================
-                    # SECTION: TABEL & GRAF (Mewarnai Node)
+                    # SECTION: TABEL & GRAF
                     # ==========================================
                     col1, col2 = st.columns([1, 1.5])
                     
@@ -141,28 +171,21 @@ if uploaded_file is not None:
                         fig, ax = plt.subplots(figsize=(10, 8))
                         pos = nx.spring_layout(product_graph, k=1.5, seed=42)
                         
-                        # 1. Menentukan Ukuran Node (berdasarkan Degree)
                         node_sizes = [max(dict(product_graph.degree)[node] * 300, 800) for node in product_graph.nodes()]
                         
-                        # 2. Menentukan Warna Node (berdasarkan Komunitas)
-                        # Membuat dictionary mapping: { 'Susu': Komunitas_0, 'Roti': Komunitas_1, dst }
                         community_map = {}
                         for i, comp in enumerate(components):
                             for node in comp:
                                 community_map[node] = i
                                 
-                        # Mengambil palet warna dengan cara calling (paling aman dari semua linter)
                         cmap = plt.get_cmap('tab20')
-                        color_palette = [cmap(i) for i in range(20)] 
+                        color_palette = [cmap(i) for i in range(20)]
                         
-                        # Menerapkan warna ke masing-masing node sesuai urutan di graf
                         node_colors = []
                         for node in product_graph.nodes():
                             idx = community_map.get(node, 0)
-                            # modulo (%) digunakan agar jika ada > 20 komunitas, warnanya berulang dengan aman
                             node_colors.append(color_palette[idx % len(color_palette)])
                         
-                        # 3. Menggambar Graf
                         nx.draw_networkx_nodes(product_graph, pos, node_color=node_colors, node_size=node_sizes, edgecolors='black', ax=ax)
                         nx.draw_networkx_edges(product_graph, pos, edge_color='#cccccc', arrows=True, ax=ax)
                         nx.draw_networkx_labels(product_graph, pos, font_size=9, font_weight='bold', font_family='sans-serif', ax=ax)
