@@ -1,196 +1,183 @@
 import streamlit as st
 import pandas as pd
-from mlxtend.frequent_patterns import apriori, association_rules
+import streamlit.components.v1 as components
+import os
 import networkx as nx
-import matplotlib.pyplot as plt
-from networkx.algorithms.community import greedy_modularity_communities
+
+from graph_processor import (build_graph_from_transactions, calculate_network_metrics, 
+                             calculate_centralities, detect_communities, 
+                             analyze_robustness, get_structural_vulnerabilities)
+from visualizer import (create_pyvis_network, plot_top_centralities, plot_robustness)
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Market Basket Graph", layout="wide")
-st.title("🛒 Dashboard Market Basket Analysis")
-st.write("Unggah dataset transaksi untuk menganalisis keterhubungan produk menggunakan Algoritma Apriori dan Teori Graf.")
+st.set_page_config(page_title="ShelfGraph Analytics", layout="wide", page_icon="🛒")
 
-# --- PANDUAN FORMAT DATA ---
-with st.expander("📌 Lihat Panduan Format Dataset (CSV)", expanded=False):
-    st.write("Dataset harus dalam format `.csv` dan wajib memiliki 4 kolom persis seperti ini: `Member_number`, `Date`, `itemDescription`, dan `itemCategory`.")
-    st.code("""Member_number,Date,itemDescription,itemCategory
-1808,21-07-2015,tropical fruit,Makanan Segar
-2552,05-01-2015,whole milk,Makanan Segar
-2300,19-09-2015,pip fruit,Makanan Segar
-1187,12-12-2015,other vegetables,Makanan Segar
-...""", language="text")
-
-# --- FUNGSI PIPELINE ---
-@st.cache_data
-def run_market_basket_graph(df, min_support, min_lift):
-    # 1. Preprocessing
-    df['Transaction_ID'] = df['Member_number'].astype(str) + "_" + df['Date'].astype(str)
-    
-    basket = (df.groupby(['Transaction_ID', 'itemDescription'])['itemDescription']
-              .count().unstack().reset_index().fillna(0)
-              .set_index('Transaction_ID'))
-    
-    basket_sets = basket > 0
-    
-    # 2. Apriori & Rules
-    frequent_itemsets = apriori(basket_sets, min_support=min_support, use_colnames=True)
-    
-    if frequent_itemsets.empty:
-        return pd.DataFrame(), nx.DiGraph()
-        
-    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=min_lift)
-    
-    # 3. Membangun Graf
-    G = nx.DiGraph()
-    for idx, row in rules.iterrows():
-        antecedent = list(row['antecedents'])[0]
-        consequent = list(row['consequents'])[0]
-        weight = row['lift']
-        G.add_edge(antecedent, consequent, weight=weight)
-        
-    return rules, G
+st.title("🛒 ShelfGraph Analytics: Optimasi Tata Letak Rak Retail")
+st.markdown("""
+Sistem Analisis Struktur Jaringan Produk menggunakan **Teori Graf** berdasarkan literatur Freeman (1978), 
+Newman (2006, 2010), dan Albert et al. (2000). Dashboard ini dirancang untuk akademisi, mahasiswa, dan manajer ritel.
+""")
 
 # --- SIDEBAR PENGATURAN ---
-st.sidebar.header("1. Upload Data")
-uploaded_file = st.sidebar.file_uploader("Pilih file CSV Dataset", type=['csv'])
+st.sidebar.header("📁 1. Upload Data")
+uploaded_file = st.sidebar.file_uploader("Upload CSV Dataset (Format Market Basket)", type=['csv'])
 
-st.sidebar.header("2. Tuning Parameter")
-support_val = st.sidebar.slider("Minimum Support", min_value=0.0001, max_value=0.1000, value=0.0010, step=0.0001, format="%.4f")
+st.sidebar.header("⚙️ 2. Parameter Jaringan")
+support_val = st.sidebar.slider("Minimum Support", min_value=0.0001, max_value=0.0500, value=0.0010, step=0.0001)
 lift_val = st.sidebar.slider("Minimum Lift", 0.1, 5.0, 1.0)
 
-# --- EKSEKUSI & TAMPILAN ---
+# --- FUNGSI UTAMA ---
 if uploaded_file is not None:
     df_raw = pd.read_csv(uploaded_file)
     
-    if st.button("Jalankan Analisis", type="primary"):
-        with st.spinner("Memproses algoritma..."):
-            # Update validasi kolom untuk menyertakan itemCategory
-            required_cols = {'Member_number', 'Date', 'itemDescription', 'itemCategory'}
-            if not required_cols.issubset(df_raw.columns):
-                st.error(f"Error: Dataset harus memiliki kolom: {required_cols}. Kolom terdeteksi: {set(df_raw.columns)}")
-            else:
-                rules_df, product_graph = run_market_basket_graph(df_raw, support_val, lift_val)
+    required_cols = {'Member_number', 'Date', 'itemDescription', 'itemCategory'}
+    if not required_cols.issubset(df_raw.columns):
+        st.error(f"Dataset harus memiliki kolom: {required_cols}. Mohon periksa kembali file Anda.")
+        st.stop()
+        
+    if st.sidebar.button("🚀 Jalankan Analisis Ekstensif", type="primary"):
+        with st.spinner("Memproses Model Teori Graf..."):
+            
+            # 1. Ekstraksi Jaringan
+            G = build_graph_from_transactions(df_raw, support_val, lift_val)
+            
+            if G.number_of_nodes() == 0:
+                st.warning("⚠️ Graf kosong. Coba turunkan Minimum Support atau Lift.")
+                st.stop()
                 
-                if rules_df.empty:
-                    st.warning("Tidak ditemukan pola hubungan (rules). Coba turunkan nilai Minimum Support atau Minimum Lift.")
-                else:
-                    st.success(f"Analisis Selesai! Ditemukan {len(rules_df)} kombinasi hubungan.")
-                    
-                    # Membuat kamus mapping (Barang -> Kategori)
-                    item_to_cat = dict(zip(df_raw['itemDescription'], df_raw['itemCategory']))
-
-                    # ==========================================
-                    # DETEKSI KOMUNITAS
-                    # ==========================================
-                    undirected_G = product_graph.to_undirected()
-                    try:
-                        components = list(greedy_modularity_communities(undirected_G))
-                        meaningful_groups = [list(comp) for comp in components if len(comp) > 1]
-                        meaningful_groups.sort(key=len, reverse=True)
-                    except:
-                        components = [list(product_graph.nodes())]
-                        meaningful_groups = []
-
-                    # ==========================================
-                    # SECTION: INSIGHT LANGSUNG
-                    # ==========================================
-                    st.markdown("---")
-                    st.subheader("💡 Insight Langsung & Analisis Bisnis")
-                    
-                    insight_col1, insight_col2 = st.columns(2)
-                    
-                    with insight_col1:
-                        st.markdown("**🏆 Top 5 Kombinasi Paling Kuat:**")
-                        
-                        insight_rules = rules_df.copy()
-                        insight_rules['combined_items'] = insight_rules.apply(
-                            lambda row: frozenset(row['antecedents'] | row['consequents']), axis=1
-                        )
-                        unique_top_rules = insight_rules.sort_values(
-                            by=['lift', 'confidence'], ascending=[False, False]
-                        ).drop_duplicates(subset=['combined_items']).head(5)
-                        
-                        for _, row in unique_top_rules.iterrows():
-                            ant_list = list(row['antecedents'])
-                            con_list = list(row['consequents'])
-                            ant = ', '.join(ant_list)
-                            con = ', '.join(con_list)
-                            
-                            # Mengambil label kategori untuk setiap barang utama
-                            cat_ant = item_to_cat.get(ant_list[0], "Lainnya")
-                            cat_con = item_to_cat.get(con_list[0], "Lainnya")
-                            
-                            st.write(f"- **{ant}** *({cat_ant})* ➔ **{con}** *({cat_con})* (Lift: {row['lift']:.2f})")
-                            
-                    with insight_col2:
-                        st.markdown("**🔗 Analisis Komunitas Berdasarkan Kategori:**")
-                        st.caption("Membedah isi komunitas graf untuk merekomendasikan strategi toko.")
-                        
-                        if meaningful_groups:
-                            for i, group in enumerate(meaningful_groups[:5], 1):
-                                # Hitung persentase dominasi kategori di komunitas ini
-                                cat_counts = {}
-                                for item in group:
-                                    cat = item_to_cat.get(item, "Lain-lain")
-                                    cat_counts[cat] = cat_counts.get(cat, 0) + 1
-                                
-                                sorted_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)
-                                dominant_cat = sorted_cats[0][0]
-                                dominant_pct = (sorted_cats[0][1] / len(group)) * 100
-                                
-                                # Menggunakan expander agar UI tidak terlalu penuh
-                                with st.expander(f"**Komunitas {i}** - Didominasi: {dominant_cat} ({dominant_pct:.0f}%)", expanded=(i==1)):
-                                    st.write(f"**Anggota:** {', '.join(group)}")
-                                    
-                                    # Output Analisis Bisnis Otomatis
-                                    st.markdown("**Analisis Bisnis:**")
-                                    if dominant_pct > 60:
-                                        st.success(f"📌 Komunitas ini sangat homogen (didominasi **{dominant_cat}**). Pelanggan menunjukkan pola *restocking* kategori spesifik.\n\n**Rekomendasi:** Kelompokkan barang-barang ini di lorong (aisle) yang sama agar pembeli lebih mudah menemukan barang terkait.")
-                                    else:
-                                        second_cat = sorted_cats[1][0] if len(sorted_cats) > 1 else "kategori lain"
-                                        st.info(f"⚡ Komunitas ini bersifat *lintas kategori*, utamanya menggabungkan **{dominant_cat}** dan **{second_cat}**. Ini adalah pola *Cross-Selling* natural.\n\n**Rekomendasi:** Buat promo 'Paket Bundling' atau pajang barang dari kategori {second_cat} di rak ujung (end-cap) dekat lorong {dominant_cat}.")
+            # 2. Kalkulasi Metrik & Teori
+            metrics = calculate_network_metrics(G)
+            centralities_df = calculate_centralities(G)
+            community_map, modularity_score, communities = detect_communities(G)
+            robustness_df = analyze_robustness(G)
+            articulations, bridges = get_structural_vulnerabilities(G)
+            
+            # --- TAB NAVIGASI ---
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "🌐 A. Network Overview", 
+                "👑 B. Top Influential Products (Centrality)", 
+                "🏘️ C. Community & Shelf Layout", 
+                "🛡️ D. Network Robustness"
+            ])
+            
+            # ====================================================
+            # TAB 1: NETWORK OVERVIEW
+            # ====================================================
+            with tab1:
+                st.header("Visualisasi Struktur Makro Jaringan")
+                st.markdown("Menganalisis topologi keseluruhan jaringan berdasarkan metrik Newman (2010).")
+                
+                col1, col2 = st.columns([1, 3])
+                
+                with col1:
+                    st.subheader("📊 Metrik Jaringan")
+                    for k, v in metrics.items():
+                        if isinstance(v, float):
+                            st.metric(label=k, value=f"{v:.4f}")
                         else:
-                            st.write("Belum ada komunitas padat yang terbentuk.")
+                            st.metric(label=k, value=str(v))
                             
                     st.markdown("---")
+                    st.subheader("💡 Interpretasi Metrik")
+                    st.info(f"Jaringan ini memiliki kepadatan (Density) sebesar **{metrics['Density']:.4f}**. "
+                            f"Rata-rata setiap produk terhubung dengan **{metrics['Average Degree']:.1f}** produk lainnya. "
+                            f"Koefisien Clustering **{metrics.get('Clustering Coefficient', 0):.4f}** mengindikasikan seberapa kuat kecenderungan produk membentuk kelompok padat (triangle).")
+                            
+                with col2:
+                    st.subheader("Graf Interaktif PyVis")
+                    html_path = create_pyvis_network(G, community_map, centralities_df)
+                    with open(html_path, 'r', encoding='utf-8') as f:
+                        components.html(f.read(), height=650)
+                    os.remove(html_path)  # Cleanup
                     
-                    # ==========================================
-                    # SECTION: TABEL & GRAF
-                    # ==========================================
-                    col1, col2 = st.columns([1, 1.5])
+            # ====================================================
+            # TAB 2: CENTRALITY & INFLUENCERS
+            # ====================================================
+            with tab2:
+                st.header("Analisis Aktor Kunci (Centrality Measures)")
+                st.markdown("Berdasarkan konsep Sentralitas oleh **Freeman (1978)**. Metrik ini krusial untuk menemukan produk *Hub* dan *Bridge*.")
+                
+                c1, c2 = st.columns(2)
+                
+                top_degree = centralities_df.sort_values(by='Degree Centrality', ascending=False).iloc[0]['Product']
+                top_between = centralities_df.sort_values(by='Betweenness Centrality', ascending=False).iloc[0]['Product']
+                
+                with c1:
+                    st.plotly_chart(plot_top_centralities(centralities_df, 'Degree Centrality', 'Top 10 Degree Centrality (Produk Terpopuler)', '#1f77b4'), use_container_width=True)
+                    st.plotly_chart(plot_top_centralities(centralities_df, 'Closeness Centrality', 'Top 10 Closeness Centrality (Aksesibilitas Cepat)', '#2ca02c'), use_container_width=True)
                     
-                    with col1:
-                        st.subheader("Tabel Hubungan Produk")
-                        display_df = rules_df[['antecedents', 'consequents', 'support', 'confidence', 'lift']].copy()
-                        display_df['antecedents'] = display_df['antecedents'].apply(lambda x: ', '.join(list(x)))
-                        display_df['consequents'] = display_df['consequents'].apply(lambda x: ', '.join(list(x)))
-                        st.dataframe(display_df, hide_index=True)
-                        
-                    with col2:
-                        st.subheader("Network Graph Visualisasi")
-                        fig, ax = plt.subplots(figsize=(10, 8))
-                        pos = nx.spring_layout(product_graph, k=1.5, seed=42)
-                        
-                        node_sizes = [max(dict(product_graph.degree)[node] * 300, 800) for node in product_graph.nodes()]
-                        
-                        community_map = {}
-                        for i, comp in enumerate(components):
-                            for node in comp:
-                                community_map[node] = i
+                with c2:
+                    st.plotly_chart(plot_top_centralities(centralities_df, 'Betweenness Centrality', 'Top 10 Betweenness Centrality (Produk Jembatan)', '#ff7f0e'), use_container_width=True)
+                    st.plotly_chart(plot_top_centralities(centralities_df, 'Eigenvector Centrality', 'Top 10 Eigenvector Centrality (Pengaruh Kualitas)', '#d62728'), use_container_width=True)
+
+                st.subheader("💡 Interpretasi Otomatis (Insight Bisnis)")
+                st.success(f"**Insight 1:** Produk **'{top_degree}'** memiliki Degree Centrality tertinggi. Ini adalah produk utama yang paling sering dibeli bersama produk lain. Posisikan di **tengah area belanja** sebagai jangkar (Anchor Product) penarik trafik pengunjung.")
+                st.warning(f"**Insight 2:** Produk **'{top_between}'** memiliki Betweenness tertinggi. Produk ini bertindak sebagai 'jembatan' antar kategori berbeda. Menempatkannya di **persimpangan lorong utama** (main aisles intersection) akan mendorong pembeli menjelajahi bagian rak yang berbeda.")
+
+            # ====================================================
+            # TAB 3: COMMUNITY & SHELF LAYOUT
+            # ====================================================
+            with tab3:
+                st.header("Struktur Komunitas & Rekomendasi Tata Letak Rak")
+                st.markdown(f"Menggunakan algoritma Greedy Modularity Maximization (**Newman, 2006**). Skor Modularity saat ini: **{modularity_score:.4f}**.")
+                
+                if modularity_score > 0.3:
+                    st.success("Skor modularitas > 0.3 menunjukkan struktur komunitas yang kuat dan terdefinisi dengan jelas.")
+                else:
+                    st.info("Skor modularitas rendah (<0.3). Hubungan antar produk cenderung acak atau tersebar secara merata.")
+
+                st.subheader("Rekomendasi Pemetaan Rak (Aisle Optimization)")
+                
+                cols = st.columns(3)
+                for i, comm in enumerate(communities):
+                    if len(comm) < 2:
+                        continue # Skip isolated nodes for shelf layout
+                    col_idx = i % 3
+                    with cols[col_idx]:
+                        with st.container(border=True):
+                            st.markdown(f"### 🛒 Rak / Zona {i+1}")
+                            st.write(f"**Jumlah Barang:** {len(comm)}")
+                            st.markdown("**Barang yang harus berdekatan:**")
+                            
+                            # Tampilkan top 5 barang dari komunitas berdasarkan degree dalam subgraf
+                            sub_g = G.subgraph(comm)
+                            sub_deg = nx.degree_centrality(sub_g)
+                            top_items = sorted(sub_deg, key=sub_deg.get, reverse=True)[:5]
+                            
+                            for item in top_items:
+                                st.write(f"- {item}")
+                            if len(comm) > 5:
+                                st.caption(f"... dan {len(comm)-5} barang lainnya.")
                                 
-                        cmap = plt.get_cmap('tab20')
-                        color_palette = [cmap(i) for i in range(20)]
+                st.markdown("---")
+                st.subheader("💡 Interpretasi Strategis Rak")
+                st.info("Berdasarkan deteksi komunitas, produk-produk dalam satu **Zona Rak** di atas sering kali masuk ke keranjang belanja secara bersamaan (Co-purchasing). Tata letak rak direkomendasikan dengan menempatkan produk yang berada dalam komunitas yang sama pada area lorong (aisle) yang berdekatan untuk meminimalkan *search cost* pembeli dan meningkatkan kenyamanan berbelanja (Impulse Buying).")
+
+            # ====================================================
+            # TAB 4: NETWORK ROBUSTNESS & VULNERABILITY
+            # ====================================================
+            with tab4:
+                st.header("Ketahanan Jaringan (Network Robustness)")
+                st.markdown("Simulasi serangan terarah (Targeted Attack) pada node *hub* (**Albert, Jeong, Barabási, 2000**).")
+                
+                r_col1, r_col2 = st.columns([2, 1])
+                
+                with r_col1:
+                    st.plotly_chart(plot_robustness(robustness_df), use_container_width=True)
+                    
+                with r_col2:
+                    st.subheader("Titik Kritis Jaringan")
+                    st.write(f"**Jumlah Articulation Points:** {len(articulations)}")
+                    st.write(f"**Jumlah Bridges:** {len(bridges)}")
+                    
+                    with st.expander("Lihat Articulation Points (Cut Vertices)"):
+                        st.write(articulations if articulations else "Tidak ditemukan titik rentan.")
                         
-                        node_colors = []
-                        for node in product_graph.nodes():
-                            idx = community_map.get(node, 0)
-                            node_colors.append(color_palette[idx % len(color_palette)])
-                        
-                        nx.draw_networkx_nodes(product_graph, pos, node_color=node_colors, node_size=node_sizes, edgecolors='black', ax=ax)
-                        nx.draw_networkx_edges(product_graph, pos, edge_color='#cccccc', arrows=True, ax=ax)
-                        nx.draw_networkx_labels(product_graph, pos, font_size=9, font_weight='bold', font_family='sans-serif', ax=ax)
-                        
-                        plt.axis('off')
-                        st.pyplot(fig)
+                st.subheader("💡 Interpretasi Ketahanan Jaringan")
+                if len(robustness_df) > 1:
+                    drop_percent = (1.0 - robustness_df.iloc[-1]['LCC Size (Fraction)']) * 100
+                    st.error(f"Penghapusan {robustness_df['Nodes Removed'].max()} produk paling sentral menyebabkan ukuran komponen utama jaringan menurun drastis sebesar **{drop_percent:.1f}%** dan terpecah menjadi **{robustness_df['Number of Components'].max()}** klaster terpisah.")
+                    st.warning("Dalam konteks bisnis (Supply Chain/Stockout): Jika produk-produk utama (Hubs) ini mengalami **kekosongan stok (Out of Stock)**, efek dominonya akan memutus rantai penjualan barang pelengkap lainnya secara signifikan. Manajemen inventaris harus memprioritaskan ketersediaan (Safety Stock) untuk produk-produk ini di atas yang lainnya.")
+
 else:
-    st.info("👈 Silakan upload file CSV dataset kamu di menu Sidebar sebelah kiri terlebih dahulu.")
+    st.info("👈 Silakan mulai dengan mengunggah dataset berformat CSV di menu samping. (Pastikan format kolom: Member_number, Date, itemDescription, itemCategory)")
