@@ -3,3 +3,4 @@ pandas
 mlxtend
 networkx
 matplotlib
+pyvis
