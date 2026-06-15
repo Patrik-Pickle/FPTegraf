@@ -4,3 +4,4 @@ mlxtend
 networkx
 matplotlib
 pyvis
+plotly
